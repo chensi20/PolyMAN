@@ -85,6 +85,7 @@ conda create -n polyman python=3.12 -y
 conda activate polyman
 pip install -r requirements.txt
 ```
+Note: PolyMAN is implemented in pure PyTorch and does NOT require extra CUDA-compiled dependencies such as mamba-ssm or causal-conv1d. This ensures seamless, cross-platform reproducibility out of the box.
 
 ## Evaluation
 To reproduce the reported test results, run:
@@ -96,7 +97,7 @@ python test.py
 Please make sure that:
 - the dataset path is correctly configured
 - the pretrained checkpoint is placed in `./checkpoints/`
-- the checkpoint filename matches `Config.EXP_NAME` in `config.py`
+- the checkpoint filename matches in `config.py`
 
 ## Training
 To train LiteMamba-Seg from scratch, run:
