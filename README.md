@@ -1,4 +1,4 @@
-# PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation
+<img width="432" height="67" alt="image" src="https://github.com/user-attachments/assets/9caa87a4-8bc7-4774-8777-c0724136b189" /># PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation
 
 Official PyTorch implementation of **"PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation"**.
 
@@ -105,10 +105,10 @@ python test.py
 Please make sure that:
 - the dataset path is correctly configured
 - the pretrained checkpoint is placed in `./checkpoints/`
-- the checkpoint filename matches `Config.EXP_NAME` in `config.py`
+- the checkpoint filename matches in `config.py`
 
 ## Training
-To train LiteMamba-Seg from scratch, run:
+To train PolyMAN from scratch, run:
 
 ```bash
 python train.py
@@ -130,8 +130,8 @@ Predicted masks and evaluation results will be saved to the output directory def
 If you find this repository useful, please cite the corresponding paper:
 
 ```bibtex
-@article{LiteMambaSeg,
-  title={Efficient and real-time polyp segmentation: A systematic evaluation of lightweight Mamba integration strategies},
+@article{PolyMAN,
+  title={PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation},
   author={...},
   journal={...},
   year={2026}
