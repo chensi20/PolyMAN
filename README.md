@@ -63,38 +63,21 @@ The pretrained model weights are archived on Zenodo:
 3. Place the downloaded file into `./checkpoints/`.
 
 ## Environment Setup
+
 The code was tested with the following environment:
 
-- Python 3.10.8
-- PyTorch 2.1.2
-- torchvision 0.16.2
-- CUDA 11.8
-- NVIDIA GeForce RTX 3080 Ti
+- Python 3.12.13
+- PyTorch 2.10.0
+- torchvision 0.25.0
+- CUDA 12.8
+- NVIDIA Tesla T4
+
+### Installation
 
 Install the required dependencies with:
 
 ```bash
 pip install -r requirements.txt
-```
-
-If you prefer to use conda, you may create an environment first:
-
-```bash
-conda create -n litemamba python=3.10 -y
-conda activate litemamba
-pip install -r requirements.txt
-```
-
-Please note that `mamba-ssm` and `causal-conv1d` are environment-sensitive dependencies. The experiments in this repository were tested with CUDA 11.8, PyTorch 2.1, and Python 3.10. You may need to install the corresponding compatible wheels according to your local system configuration.
-
-If you encounter OpenMP-related warnings on some systems, you may optionally run:
-
-```bash
-export OMP_NUM_THREADS=1
-```
-
-before training or evaluation.
-
 ## Evaluation
 To reproduce the reported test results, run:
 
