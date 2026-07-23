@@ -78,17 +78,13 @@ Install the required dependencies with:
 
 ```bash
 pip install -r requirements.txt
-## Evaluation
-To reproduce the reported test results, run:
-
 ```bash
-python test.py
-```
-
-Please make sure that:
-- the dataset path is correctly configured
-- the pretrained checkpoint is placed in `./checkpoints/`
-- the checkpoint filename matches in `config.py`
+If you prefer to use conda, you may create an environment first:
+```bash
+conda create -n polyman python=3.12 -y
+conda activate polyman
+pip install -r requirements.txt
+```bash
 
 ## Training
 To train PolyMAN from scratch, run:
