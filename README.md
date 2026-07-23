@@ -1,4 +1,4 @@
-<img width="432" height="67" alt="image" src="https://github.com/user-attachments/assets/9caa87a4-8bc7-4774-8777-c0724136b189" /># PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation
+# PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation
 
 Official PyTorch implementation of **"PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation"**.
 
