@@ -78,16 +78,28 @@ Install the required dependencies with:
 
 ```bash
 pip install -r requirements.txt
-```bash
+```
 If you prefer to use conda, you may create an environment first:
 ```bash
 conda create -n polyman python=3.12 -y
 conda activate polyman
 pip install -r requirements.txt
+```
+
+## Evaluation
+To reproduce the reported test results, run:
+
 ```bash
+python test.py
+```
+
+Please make sure that:
+- the dataset path is correctly configured
+- the pretrained checkpoint is placed in `./checkpoints/`
+- the checkpoint filename matches `Config.EXP_NAME` in `config.py`
 
 ## Training
-To train PolyMAN from scratch, run:
+To train LiteMamba-Seg from scratch, run:
 
 ```bash
 python train.py
