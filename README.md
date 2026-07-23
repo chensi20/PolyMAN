@@ -61,21 +61,6 @@ The pretrained model weights are archived on Zenodo:
 1. Create a folder named `./checkpoints/` in the project root directory.
 2. Download the pretrained checkpoint from the Zenodo record.
 3. Place the downloaded file into `./checkpoints/`.
-4. Rename the checkpoint file to match `Config.EXP_NAME` defined in `config.py`.
-
-For example, if `Config.EXP_NAME` is set to:
-
-```python
-best_model_Conv_Bottleneck_D4
-```
-
-then the checkpoint file should be renamed as:
-
-```text
-./checkpoints/best_model_Conv_Bottleneck_D4.pth
-```
-
-before running evaluation.
 
 ## Environment Setup
 The code was tested with the following environment:
