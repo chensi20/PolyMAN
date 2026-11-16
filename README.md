@@ -100,7 +100,7 @@ Please make sure that:
 - the checkpoint filename matches in `config.py`
 
 ## Training
-To train LiteMamba-Seg from scratch, run:
+To train PolyMAN from scratch, run:
 
 ```bash
 python train.py
