@@ -1,10 +1,11 @@
+import os
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import cv2
-import os
-import numpy as np
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 try:
     from torch.amp import GradScaler
@@ -20,6 +21,18 @@ from utils.metrics import calculate_metrics
 from models.PolyMAN import PolyMAN_UNet as UNet
 
 
+def seed_everything(seed=42):
+    
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 # 1. Boundary IoU Loss
 class BoundaryIoULoss(nn.Module):
     def __init__(self):
@@ -27,14 +40,16 @@ class BoundaryIoULoss(nn.Module):
 
     def forward(self, pred, target):
         """
-        IoU Loss
+        Boundary IoU Loss Computation
         pred: Logits
         target: Binary Mask
         """
         pred = torch.sigmoid(pred)
         
-        if target.ndim == 3: target = target.unsqueeze(1)
-        if pred.ndim == 3: pred = pred.unsqueeze(1)
+        if target.ndim == 3: 
+            target = target.unsqueeze(1)
+        if pred.ndim == 3: 
+            pred = pred.unsqueeze(1)
 
         target = target.float()
         
@@ -56,18 +71,22 @@ def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group['lr']
 
-# Deep Supervision
+
+# Deep Supervision Training Function
 def train_one_epoch(model, loader, criterion_main, criterion_bound, optimizer, scaler, device, epoch):
     model.train()
-    running_loss = 0
+    running_loss = 0.0
     
     loop = tqdm(loader, desc=f"Epoch {epoch+1}/{Config.EPOCHS} [Train]", leave=True)
+    
+    alpha = getattr(Config, 'ALPHA_BOUNDARY_LOSS', 0.3)  # Bind the alpha weight parameter from Config
+    ds_weights = getattr(Config, 'DEEP_SUPERVISION_WEIGHTS', [1.0, 0.5, 0.3, 0.2])
     
     for images, masks in loop:
         images = images.to(device)
         masks = masks.to(device)
         
-        #  [B, H, W] -> [B, 1, H, W]
+        # Reshape masks: [B, H, W] -> [B, 1, H, W]
         if masks.ndim == 3:
             masks = masks.unsqueeze(1)
         elif masks.ndim == 4 and masks.shape[-1] == 1:
@@ -82,33 +101,40 @@ def train_one_epoch(model, loader, criterion_main, criterion_bound, optimizer, s
             if isinstance(preds, (tuple, list)):
                 out1, out2, out3, out4 = preds
                 
-                loss1 = criterion_main(out1, masks) + 0.3 * criterion_bound(out1, masks)
+                # Main output contains both Structure Loss and Boundary IoU Loss weighted by explicit alpha
+                loss1 = criterion_main(out1, masks) + alpha * criterion_bound(out1, masks)
                 loss2 = criterion_main(out2, masks)
                 loss3 = criterion_main(out3, masks)
                 loss4 = criterion_main(out4, masks)
                 
-                loss = loss1 + 0.3 * loss2 + 0.2 * loss3 + 0.1 * loss4
+                loss = (ds_weights[0] * loss1 + 
+                        ds_weights[1] * loss2 + 
+                        ds_weights[2] * loss3 + 
+                        ds_weights[3] * loss4)
                 
             else:
                 loss_main = criterion_main(preds, masks)
                 loss_bound = criterion_bound(preds, masks)
-                loss = loss_main + 0.5 * loss_bound
+                loss = loss_main + alpha * loss_bound
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         
         running_loss += loss.item()
-
         loop.set_postfix(loss=loss.item(), lr=get_lr(optimizer))
         
     return running_loss / len(loader)
 
-def validate(model, loader, criterion, device):
-    model.eval()
-    running_loss = 0
 
+def validate(model, loader, criterion_main, criterion_bound, device):
+    """
+    Evaluate on the 10% independent validation set (145 images split from the Development Pool).
+    """
+    model.eval()
+    running_loss = 0.0
     metrics_score = {"dice": 0.0, "iou": 0.0, "recall": 0.0, "precision": 0.0}
+    alpha = getattr(Config, 'ALPHA_BOUNDARY_LOSS', 0.3)
     
     with torch.no_grad():
         for images, masks in tqdm(loader, desc="[Val]", leave=False):
@@ -122,16 +148,18 @@ def validate(model, loader, criterion, device):
             
             with torch.autocast(device_type='cuda', dtype=torch.float16):
                 preds = model(images)
-                # Handle tuple output from deep supervision for validation
+                
                 if isinstance(preds, (tuple, list)):
                     preds = preds[0]
                 
-                loss = criterion(preds, masks)
+                loss_main = criterion_main(preds, masks)
+                loss_bound = criterion_bound(preds, masks)
+                loss = loss_main + alpha * loss_bound
             
             running_loss += loss.item()
             
             preds_prob = torch.sigmoid(preds)
-            preds_bin = (preds_prob > 0.5).float() 
+            preds_bin = (preds_prob > getattr(Config, 'PRED_THRESHOLD', 0.5)).float() 
             
             batch_metrics = calculate_metrics(preds_bin, masks.float())
             
@@ -146,36 +174,49 @@ def validate(model, loader, criterion, device):
     return epoch_loss, metrics_score
 
 
-
-if __name__ == "__main__":
-    os.makedirs("checkpoints", exist_ok=True)
-    device = Config.DEVICE
-    print(f"Starting training | Device: {device} | Model: PolyMAN")
-
-    train_loader, val_loader, test_loader = get_loaders(Config)
-    print(f"Data loading complete: Train set {len(train_loader)} batches | Val set {len(val_loader)} batches")
-
-    model = UNet(n_classes=1).to(device)
+def train_pipeline(config=Config, seed=42):
     
-    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.EPOCHS, eta_min=1e-6)
+    seed_everything(seed)
+    
+    device = config.DEVICE
+    os.makedirs(config.SAVE_DIR, exist_ok=True)
+    
+    print("\n" + "=" * 70)
+    print(f"🚀 Training PolyMAN | Device: {device} | Seed: {seed}")
+    print("=" * 70)
+
+    # 2. Load 1,305 training samples + 145 independent validation samples from dataset
+    
+    train_loader, val_loader = get_loaders(config)
+    print(f"Data Loaded: Train {len(train_loader)} batches | Val {len(val_loader)} batches")
+
+    # 3. Initialize model
+    model = UNet(n_classes=config.NUM_CLASSES).to(device)
+    
+    # 4. Optimizer & LR Scheduler
+    weight_decay = getattr(config, 'WEIGHT_DECAY', 1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=weight_decay)
+    scheduler = CosineAnnealingLR(
+        optimizer, 
+        T_max=getattr(config, 'T_MAX', config.EPOCHS), 
+        eta_min=getattr(config, 'ETA_MIN', 1e-6)
+    )
     
     criterion_main = StructureLoss()            
     criterion_bound = BoundaryIoULoss().to(device) 
-    
     scaler = GradScaler() 
     
     best_dice = 0.0
+    best_ckpt_path = os.path.join(config.SAVE_DIR, f"best_model_seed_{seed}.pth")
+    last_ckpt_path = os.path.join(config.SAVE_DIR, f"last_model_seed_{seed}.pth")
     
-    for epoch in range(Config.EPOCHS):
-
+    for epoch in range(config.EPOCHS):
         train_loss = train_one_epoch(
             model, train_loader, criterion_main, criterion_bound, 
             optimizer, scaler, device, epoch
         )
         
-        val_loss, metrics = validate(model, val_loader, criterion_main, device)
-        
+        val_loss, metrics = validate(model, val_loader, criterion_main, criterion_bound, device)
         scheduler.step()
         current_lr = get_lr(optimizer)
         
@@ -183,21 +224,30 @@ if __name__ == "__main__":
         save_msg = ""
         if is_best:
             best_dice = metrics['dice']
-            torch.save(model.state_dict(), "checkpoints/best_model.pth")
-            save_msg = "Best Dice!"
+            torch.save({
+                'epoch': epoch + 1,
+                'seed': seed,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_val_dice': best_dice,
+            }, best_ckpt_path)
             
-        torch.save(model.state_dict(), "checkpoints/last_model.pth")
+            # Save a default best_model.pth to ensure compatibility with existing evaluation scripts
+            torch.save(model.state_dict(), os.path.join(config.SAVE_DIR, "best_model.pth"))
+            save_msg = "🔥 [Best Val Dice Updated!]"
+            
+        torch.save(model.state_dict(), last_ckpt_path)
         
-        print(f"\n Epoch {epoch+1} Summary:")
+        print(f"\nEpoch [{epoch+1}/{config.EPOCHS}] Summary:")
         print(f"   Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-        print(f"   Dice: {metrics['dice']:.4f} | IoU: {metrics['iou']:.4f}")
+        print(f"   Val Dice: {metrics['dice']:.4f} | Val IoU: {metrics['iou']:.4f}")
         print(f"   Recall: {metrics['recall']:.4f} | Precision: {metrics['precision']:.4f}")
-        print(f"   LR: {current_lr:.6f} | {save_msg}")
+        print(f"   LR: {current_lr:.6f} {save_msg}")
         print("-" * 60)
 
-    print(f"\n Finish! Best Dice: {best_dice:.4f}")
+    print(f"\n🎉 Training Finished! Best Validation Dice (Seed {seed}): {best_dice:.4f}\n")
 
-    
-    # [EXECUTING] Saving with Real Names
-    #save_path = "results/PolyMAN_Visuals/"
-    #save_test_results(model, test_loader, save_path, device)
+
+if __name__ == "__main__":
+    # Execute training pipeline with the main seed
+    train_pipeline(config=Config, seed=Config.SEED)
