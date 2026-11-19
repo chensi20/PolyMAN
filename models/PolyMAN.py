@@ -4,95 +4,133 @@ import torch.nn.functional as F
 import torchvision.models as models
 from .blocks import HybridBottleneck, SGAM, GLFM, unpack_tuple
 
-# PolyMAN (Final Version: Mamba Broadcast + Hybrid Non-Local)
+
 class ConvBlock(nn.Module):
+    """Standard double convolution block used in decoder stage 1."""
     def __init__(self, in_c, out_c):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(True),
-            nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(True)
+            nn.Conv2d(in_c, out_c, 3, padding=1),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(True),
+            nn.Conv2d(out_c, out_c, 3, padding=1),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(True)
         )
+
     def forward(self, x): 
         return self.conv(x)
 
+
 class PolyMAN_UNet(nn.Module):
-    def __init__(self, n_classes=1):
+    def __init__(
+        self, 
+        n_classes=1, 
+        pretrained=True,
+        use_mamba_stream=True,
+        use_cnn_stream=True,
+        scan_mode="1D",
+        use_sgam=True,
+        use_glfm_nl=True
+    ):
+        """
+        PolyMAN Architecture with Flexible Switches for Ablation Studies.
+        
+        Args:
+            n_classes (int): Number of segmentation classes. Default: 1.
+            pretrained (bool): Load ImageNet pre-trained weights for ResNet-34 encoder.
+            use_mamba_stream (bool): Enable Mamba stream in Hybrid Bottleneck (Table IV ablation).
+            use_cnn_stream (bool): Enable CNN stream in Hybrid Bottleneck (Table IV ablation).
+            scan_mode (str): "1D" (proposed linear scan) or "SS2D" (4-way 2D scan, Table V ablation).
+            use_sgam (bool): Enable Structure-Guided Attention Module in skip connections.
+            use_glfm_nl (bool): Enable Non-Local block inside GLFM decoder.
+        """
         super().__init__()
+        self.use_sgam = use_sgam
         
-        # --- 1. Encoder: ResNet34 ---
-        print(" Building PolyMAN (Hybrid): Loading ResNet34 pretrained weights...")
-        resnet = models.resnet34(weights=models.ResNet34_Weights.DEFAULT)
-        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu) # 64
-        self.pool = resnet.maxpool
-        self.enc2 = resnet.layer1 # 64
-        self.enc3 = resnet.layer2 # 128
-        self.enc4 = resnet.layer3 # 256
-        self.enc5 = resnet.layer4 # 512
+        # --- 1. Encoder: ResNet-34 ---
+        weights = models.ResNet34_Weights.DEFAULT if pretrained else None
+        resnet = models.resnet34(weights=weights)
         
-        # --- 2. Bottleneck (Mamba) ---
-        self.bottleneck = HybridBottleneck(512)
+        self.enc1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # 64, H/2
+        self.pool = resnet.maxpool                                       # 64, H/4
+        self.enc2 = resnet.layer1                                        # 64, H/4
+        self.enc3 = resnet.layer2                                        # 128, H/8
+        self.enc4 = resnet.layer3                                        # 256, H/16
+        self.enc5 = resnet.layer4                                        # 512, H/32
         
-        # --- 3. Skip Connections (SGAM) ---
-        self.sgam4 = SGAM(256)
-        self.sgam3 = SGAM(128)
-        self.sgam2 = SGAM(64)
+        # --- 2. Bottleneck: Flexible Hybrid Bottleneck ---
+        self.bottleneck = HybridBottleneck(
+            dim=512, 
+            use_mamba_stream=use_mamba_stream, 
+            use_cnn_stream=use_cnn_stream, 
+            scan_mode=scan_mode
+        )
         
-        # --- 4. Decoder: Hybrid GLFM ---
-        self.glfm4 = GLFM(high_channels=512, low_channels=256, out_channels=256, 
-                          mamba_channels=512, use_non_local=True)
+        # --- 3. Skip Connections: SGAM ---
+        if self.use_sgam:
+            self.sgam4 = SGAM(256)
+            self.sgam3 = SGAM(128)
+            self.sgam2 = SGAM(64)
         
-        self.glfm3 = GLFM(high_channels=256, low_channels=128, out_channels=128, 
-                          mamba_channels=512, use_non_local=True)
+        # --- 4. Decoder: Global-Local Fusion Module (GLFM) ---
+        self.glfm4 = GLFM(
+            high_channels=512, low_channels=256, out_channels=256, 
+            mamba_channels=512, use_non_local=use_glfm_nl
+        )
+        self.glfm3 = GLFM(
+            high_channels=256, low_channels=128, out_channels=128, 
+            mamba_channels=512, use_non_local=use_glfm_nl
+        )
+        self.glfm2 = GLFM(
+            high_channels=128, low_channels=64, out_channels=64, 
+            mamba_channels=512, use_non_local=False
+        )
         
-        self.glfm2 = GLFM(high_channels=128, low_channels=64, out_channels=64, 
-                          mamba_channels=512, use_non_local=False)
-        
-        # Decoder 1: Standard Upsample 
+        # Decoder Stage 1: Standard Upsample & Concat
         self.up1 = nn.ConvTranspose2d(64, 32, 2, stride=2) 
         self.dec1 = ConvBlock(32 + 64, 32)
         
-        # --- 5. Deep Supervision ---
+        # --- 5. Deep Supervision Heads ---
         self.head1 = nn.Conv2d(32, n_classes, 1)
         self.head2 = nn.Conv2d(64, n_classes, 1)
         self.head3 = nn.Conv2d(128, n_classes, 1)
         self.head4 = nn.Conv2d(256, n_classes, 1)
 
     def forward(self, x):
-        # --- Encoder ---
+        # --- 1. Encoder Forward Pass ---
         x = unpack_tuple(x)
-        e1 = self.enc1(x)       # 64, H/2
-        e_pool = self.pool(e1)  # 64, H/4
-        e2 = self.enc2(e_pool)  # 64, H/4
-        e3 = self.enc3(e2)      # 128, H/8
-        e4 = self.enc4(e3)      # 256, H/16
-        e5 = self.enc5(e4)      # 512, H/32
+        e1 = self.enc1(x)        # 64, H/2
+        e_pool = self.pool(e1)   # 64, H/4
+        e2 = self.enc2(e_pool)   # 64, H/4
+        e3 = self.enc3(e2)       # 128, H/8
+        e4 = self.enc4(e3)       # 256, H/16
+        e5 = self.enc5(e4)       # 512, H/32
         
-        # --- Bottleneck ---
-        # b: Mamba (Global Context)
-        b = self.bottleneck(e5) 
+        # --- 2. Bottleneck Forward Pass ---
+        b = self.bottleneck(e5)  # 512, H/32
         
-        # --- Decoder + Skip (With Global Broadcasting) ---
+        # --- 3. Skip Connection Enhancement (SGAM) ---
+        if self.use_sgam:
+            e4_feat = self.sgam4(e4)
+            e3_feat = self.sgam3(e3)
+            e2_feat = self.sgam2(e2)
+        else:
+            e4_feat, e3_feat, e2_feat = e4, e3, e2
         
-        # Stage 4
-        e4_enhanced = self.sgam4(e4)        
-        d4 = self.glfm4(x_global=b, x_local=e4_enhanced, mamba_feat=b)
+        # --- 4. Decoder Forward Pass with Global Broadcasting ---
+        d4 = self.glfm4(x_global=b, x_local=e4_feat, mamba_feat=b)
+        d3 = self.glfm3(x_global=d4, x_local=e3_feat, mamba_feat=b) 
+        d2 = self.glfm2(x_global=d3, x_local=e2_feat, mamba_feat=b) 
         
-        # Stage 3
-        e3_enhanced = self.sgam3(e3)
-        d3 = self.glfm3(x_global=d4, x_local=e3_enhanced, mamba_feat=b) 
-        
-        # Stage 2
-        e2_enhanced = self.sgam2(e2)
-        d2 = self.glfm2(x_global=d3, x_local=e2_enhanced, mamba_feat=b) 
-        
-        # Stage 1
+        # Stage 1 Final Refinement
         d1 = self.up1(d2)              
         if d1.shape != e1.shape:
             d1 = F.interpolate(d1, size=e1.shape[2:], mode='bilinear', align_corners=True)
         d1 = torch.cat([d1, e1], dim=1)
         d1 = self.dec1(d1)
         
-        # --- Output ---
+        # --- 5. Multi-scale Output Heads ---
         out1 = self.head1(d1)
         out1 = F.interpolate(out1, size=x.shape[2:], mode='bilinear', align_corners=True)
         

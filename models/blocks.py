@@ -3,12 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+
 def unpack_tuple(x):
+    """Helper function to unpack single-element tuples/lists from backbone outputs."""
     if isinstance(x, (tuple, list)):
         return unpack_tuple(x[0])
     return x
 
-# 1. Sobel Operator 
+
+# -------------------------------------------------------------------------
+# 1. Sobel Edge Detection Operator
+# -------------------------------------------------------------------------
 class SobelOperator(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -30,7 +35,10 @@ class SobelOperator(nn.Module):
         gy = self.conv_y(x)
         return torch.sqrt(gx**2 + gy**2 + 1e-6)
 
-# 2. SGAM 
+
+# -------------------------------------------------------------------------
+# 2. Structure-Guided Attention Module (SGAM)
+# -------------------------------------------------------------------------
 class SGAM(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super().__init__()
@@ -50,12 +58,17 @@ class SGAM(nn.Module):
         b, c, _, _ = x.size()
         y_chan = self.avg_pool(x).view(b, c)
         y_chan = self.fc(y_chan).view(b, c, 1, 1)
+        
         edge_map = self.sobel(x)
         spatial_map = self.spatial_conv(x)
         y_spatial = self.sigmoid(spatial_map + torch.mean(edge_map, dim=1, keepdim=True))
+        
         return x * y_chan * y_spatial
 
-#  Non-Local  (Embedded Gaussian) ---
+
+# -------------------------------------------------------------------------
+# 3. Non-Local Block (Embedded Gaussian Formulation - Wang et al., CVPR 2018)
+# -------------------------------------------------------------------------
 class NonLocalBlock(nn.Module):
     def __init__(self, in_channels, inter_channels=None):
         super().__init__()
@@ -83,7 +96,10 @@ class NonLocalBlock(nn.Module):
         
         return self.W(y) + x
 
-# 3. GLFM (Mamba  +  Non-Local )
+
+# -------------------------------------------------------------------------
+# 4. Global-Local Fusion Module (GLFM)
+# -------------------------------------------------------------------------
 class GLFM(nn.Module):
     def __init__(self, high_channels, low_channels, out_channels, mamba_channels=512, use_non_local=False):
         super().__init__()
@@ -91,7 +107,6 @@ class GLFM(nn.Module):
         
         self.conv_global = nn.Sequential(nn.Conv2d(high_channels, out_channels, 1), nn.BatchNorm2d(out_channels), nn.ReLU(True))
         self.conv_local = nn.Sequential(nn.Conv2d(low_channels, out_channels, 1), nn.BatchNorm2d(out_channels), nn.ReLU(True))
-        
         self.conv_mamba = nn.Sequential(nn.Conv2d(mamba_channels, out_channels, 1), nn.BatchNorm2d(out_channels), nn.ReLU(True))
         
         if self.use_non_local:
@@ -99,10 +114,8 @@ class GLFM(nn.Module):
             self.branch_conv = nn.Sequential(
                 nn.Conv2d(out_channels, out_channels, 1), nn.BatchNorm2d(out_channels), nn.ReLU(True)
             )
-          
             fusion_in = out_channels * 4
         else:
-
             fusion_in = out_channels * 3
 
         self.fusion = nn.Sequential(
@@ -113,8 +126,7 @@ class GLFM(nn.Module):
     def forward(self, x_global, x_local, mamba_feat):
         x_global = unpack_tuple(x_global)
         x_local = unpack_tuple(x_local)
-        mamba_feat = unpack_tuple(mamba_feat) 
-        
+        mamba_feat = unpack_tuple(mamba_feat)
 
         g = self.conv_global(x_global)
         l = self.conv_local(x_local)
@@ -133,33 +145,51 @@ class GLFM(nn.Module):
             
         return self.fusion(out)
 
-# 4. OmniScaleBlock 
+
+# -------------------------------------------------------------------------
+# 5. Omni-Scale Block (Parallel 1x1, 3x3, 5x5 Conv)
+# -------------------------------------------------------------------------
 class OmniScaleBlock(nn.Module):
     def __init__(self, dim):
         super().__init__()
         mid_dim = dim // 4 
-        self.branch3x3 = nn.Sequential(nn.Conv2d(dim, mid_dim, 1),nn.BatchNorm2d(mid_dim),nn.ReLU(True),nn.Conv2d(mid_dim, mid_dim, 3, padding=1, groups=mid_dim),nn.BatchNorm2d(mid_dim),nn.ReLU(True))
-        self.branch5x5 = nn.Sequential(nn.Conv2d(dim, mid_dim, 1),nn.BatchNorm2d(mid_dim),nn.ReLU(True),nn.Conv2d(mid_dim, mid_dim, 5, padding=2, groups=mid_dim),nn.BatchNorm2d(mid_dim),nn.ReLU(True))
-        self.branch1x1 = nn.Sequential(nn.Conv2d(dim, mid_dim, 1), nn.BatchNorm2d(mid_dim), nn.ReLU(True))
+        self.branch3x3 = nn.Sequential(
+            nn.Conv2d(dim, mid_dim, 1), nn.BatchNorm2d(mid_dim), nn.ReLU(True),
+            nn.Conv2d(mid_dim, mid_dim, 3, padding=1, groups=mid_dim), nn.BatchNorm2d(mid_dim), nn.ReLU(True)
+        )
+        self.branch5x5 = nn.Sequential(
+            nn.Conv2d(dim, mid_dim, 1), nn.BatchNorm2d(mid_dim), nn.ReLU(True),
+            nn.Conv2d(mid_dim, mid_dim, 5, padding=2, groups=mid_dim), nn.BatchNorm2d(mid_dim), nn.ReLU(True)
+        )
+        self.branch1x1 = nn.Sequential(
+            nn.Conv2d(dim, mid_dim, 1), nn.BatchNorm2d(mid_dim), nn.ReLU(True)
+        )
         self.fusion = nn.Conv2d(mid_dim * 3, dim, 1)
-        self.bn = nn.BatchNorm2d(dim); self.act = nn.ReLU(True)
+        self.bn = nn.BatchNorm2d(dim)
+        self.act = nn.ReLU(True)
+
     def forward(self, x):
         x = unpack_tuple(x)
-        return self.act(self.bn(self.fusion(torch.cat([self.branch1x1(x), self.branch3x3(x), self.branch5x5(x)], dim=1)) + x))
+        branches = torch.cat([self.branch1x1(x), self.branch3x3(x), self.branch5x5(x)], dim=1)
+        return self.act(self.bn(self.fusion(branches)) + x)
 
-# 5. LargeKernelBlock
+
+# -------------------------------------------------------------------------
+# 6. Large-Kernel Conv Block (7x7 Depthwise Conv - RepLKNet style)
+# -------------------------------------------------------------------------
 class LargeKernelBlock(nn.Module):
-    def __init__(self, dim, kernel_size=7, num_heads=8):
+    def __init__(self, dim, kernel_size=7):
         super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.attn = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size//2, groups=dim) 
-        self.drop_path = nn.Identity()
+        self.attn = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim) 
 
     def forward(self, x):
         x = unpack_tuple(x)
-        return x + self.attn(x) 
+        return x + self.attn(x)
 
-# 6. VisionSSMBlock 
+
+# -------------------------------------------------------------------------
+# 7. Vision State-Space SSM Block (Supports 1D Sequence Scan and 2D SS2D Scan)
+# -------------------------------------------------------------------------
 def selective_scan_seq(u, delta, A, B, C, D):
     batch_size, length, d_inner = u.shape
     d_state = A.shape[1]
@@ -174,58 +204,119 @@ def selective_scan_seq(u, delta, A, B, C, D):
     y = torch.stack(ys, dim=1)
     return y + u * D
 
+
 class VisionSSMBlock(nn.Module):
-    def __init__(self, dim, d_state=16, expand=1.5, dt_rank="auto"):
+    def __init__(self, dim, d_state=16, expand=1.5, dt_rank="auto", scan_mode="1D"):
         super().__init__()
         self.dim = dim
+        self.scan_mode = scan_mode  # "1D" (proposed lightweight) or "SS2D" (4-way scan)
         self.d_inner = int(expand * dim)
         self.dt_rank = math.ceil(dim / 16) if dt_rank == "auto" else dt_rank
         self.d_state = d_state
+        
         self.norm = nn.LayerNorm(dim)
         self.in_proj = nn.Linear(dim, self.d_inner * 2)
         self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, 3, padding=1, groups=self.d_inner)
         self.act = nn.SiLU()
         self.x_proj = nn.Linear(self.d_inner, self.dt_rank + d_state * 2, bias=False)
         self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True)
+        
         A = torch.arange(1, d_state + 1, dtype=torch.float32).repeat(self.d_inner // d_state + 1)[:self.d_inner]
         self.A_log = nn.Parameter(torch.log(A))
         self.D = nn.Parameter(torch.ones(self.d_inner))
         self.out_norm = nn.LayerNorm(self.d_inner)
         self.out_proj = nn.Linear(self.d_inner, dim)
 
-    def forward(self, x):
-        x = unpack_tuple(x)
-        B, C, H, W = x.shape
-        x_in = x.flatten(2).transpose(1, 2)
-        x_in = self.norm(x_in)
-        x_and_z = self.in_proj(x_in)
+    def _process_sequence(self, x_seq):
+        x_and_z = self.in_proj(x_seq)
         x_src, z = x_and_z.chunk(2, dim=-1)
         x_src = x_src.transpose(1, 2)
         x_src = self.conv1d(x_src)
         x_src = self.act(x_src).transpose(1, 2)
+        
         x_dbl = self.x_proj(x_src)
         dt, B_ssm, C_ssm = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
         dt = F.softplus(self.dt_proj(dt))
         A = -torch.exp(self.A_log.float())
+        
         y = selective_scan_seq(x_src, dt, A.unsqueeze(1).repeat(1, self.d_state), B_ssm, C_ssm, self.D)
         y = y * self.act(z)
         y = self.out_norm(y)
-        out = self.out_proj(y)
-        return out.transpose(1, 2).view(B, C, H, W) + x
-
-# 7. Hybrid Bottleneck
-class HybridBottleneck(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.local_pre = OmniScaleBlock(dim)
-        self.local_stream = LargeKernelBlock(dim)
-        self.global_stream = VisionSSMBlock(dim)
-        self.fusion = nn.Sequential(nn.Conv2d(dim * 2, dim, 1), nn.BatchNorm2d(dim), nn.ReLU(True))
+        return self.out_proj(y)
 
     def forward(self, x):
         x = unpack_tuple(x)
-        x_base = self.local_pre(x)
-        x_local = self.local_stream(x_base)
-        x_global = self.global_stream(x)
-        out = torch.cat([x_local, x_global], dim=1)
-        return self.fusion(out)
+        B, C, H, W = x.shape
+        
+        if self.scan_mode == "SS2D":
+            # --- 4-way Selective Scan (SS2D) for Table V Ablation ---
+            # 1. Forward Scan
+            x_1 = x.flatten(2).transpose(1, 2)
+            x_1 = self.norm(x_1)
+            y_1 = self._process_sequence(x_1).transpose(1, 2).view(B, C, H, W)
+
+            # 2. Backward Scan (Flipped)
+            x_2 = torch.flip(x, dims=[2, 3]).flatten(2).transpose(1, 2)
+            x_2 = self.norm(x_2)
+            y_2 = self._process_sequence(x_2).transpose(1, 2).view(B, C, H, W)
+            y_2 = torch.flip(y_2, dims=[2, 3])
+
+            # 3. Transposed Forward Scan
+            x_3 = x.transpose(2, 3).flatten(2).transpose(1, 2)
+            x_3 = self.norm(x_3)
+            y_3 = self._process_sequence(x_3).transpose(1, 2).view(B, C, W, H).transpose(2, 3)
+
+            # 4. Transposed Backward Scan
+            x_4 = torch.flip(x.transpose(2, 3), dims=[2, 3]).flatten(2).transpose(1, 2)
+            x_4 = self.norm(x_4)
+            y_4 = self._process_sequence(x_4).transpose(1, 2).view(B, C, W, H)
+            y_4 = torch.flip(y_4, dims=[2, 3]).transpose(2, 3)
+
+            y_out = (y_1 + y_2 + y_3 + y_4) / 4.0
+            return y_out + x
+        else:
+            # --- Proposed 1D Flattened Scan (Default, Linear Complexity) ---
+            x_in = x.flatten(2).transpose(1, 2)
+            x_in = self.norm(x_in)
+            out = self._process_sequence(x_in)
+            return out.transpose(1, 2).view(B, C, H, W) + x
+
+
+# -------------------------------------------------------------------------
+# 8. Hybrid Bottleneck (Supports 2x2 Stream Ablation & SS2D Switch)
+# -------------------------------------------------------------------------
+class HybridBottleneck(nn.Module):
+    def __init__(self, dim, use_mamba_stream=True, use_cnn_stream=True, scan_mode="1D"):
+        super().__init__()
+        self.use_mamba_stream = use_mamba_stream
+        self.use_cnn_stream = use_cnn_stream
+
+        if self.use_cnn_stream:
+            self.local_pre = OmniScaleBlock(dim)
+            self.local_stream = LargeKernelBlock(dim)
+
+        if self.use_mamba_stream:
+            self.global_stream = VisionSSMBlock(dim, scan_mode=scan_mode)
+
+        if self.use_mamba_stream and self.use_cnn_stream:
+            self.fusion = nn.Sequential(nn.Conv2d(dim * 2, dim, 1), nn.BatchNorm2d(dim), nn.ReLU(True))
+
+    def forward(self, x):
+        x = unpack_tuple(x)
+        
+        if self.use_mamba_stream and self.use_cnn_stream:
+            # Proposed Parallel Decoupled Design
+            x_base = self.local_pre(x)
+            x_local = self.local_stream(x_base)
+            x_global = self.global_stream(x)
+            out = torch.cat([x_local, x_global], dim=1)
+            return self.fusion(out)
+        elif self.use_mamba_stream:
+            # Mamba-only Stream Ablation
+            return self.global_stream(x)
+        elif self.use_cnn_stream:
+            # CNN-only Stream Ablation
+            x_base = self.local_pre(x)
+            return self.local_stream(x_base)
+        else:
+            return x
