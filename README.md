@@ -123,7 +123,7 @@ If you find this repository useful, please cite the corresponding paper:
 
 ```bibtex
 @article{PolyMAN,
-  title={PolyMAN: A Hybrid Mamba-Based Framework for Real-Time Polyp Segmentation},
+  title={PolyMAN: A Decoupled Parallel Mamba Framework for Real-Time Polyp Segmentation},
   author={...},
   journal={...},
   year={2026}
