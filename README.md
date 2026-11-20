@@ -55,7 +55,7 @@ Please adjust the folder names if your local implementation uses different paths
 ## Pretrained Weights
 The pretrained model weights are archived on Zenodo:
 
-- **DOI:** `https://doi.org/10.5281/zenodo.21506256`
+- **DOI:** `https://doi.org/10.5281/zenodo.21506255`
 
 ### Setup Steps
 1. Create a folder named `./checkpoints/` in the project root directory.
